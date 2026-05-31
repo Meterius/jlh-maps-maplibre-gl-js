@@ -72,6 +72,7 @@ const version = packageJSON.version;
 
 export type WebGLSupportedVersions = 'webgl2' | 'webgl' | undefined;
 export type WebGLContextAttributesWithType = WebGLContextAttributes & {contextType?: WebGLSupportedVersions};
+export type RenderCompositeHook = (transform: ITransform) => Promise<unknown>;
 
 /**
  * The {@link Map} options object.
@@ -593,6 +594,13 @@ export class Map extends Camera {
     _terrainDataCallback: (e: MapStyleDataEvent | MapSourceDataEvent) => void;
     /** @internal */
     _zoomLevelsToOverscale: number | undefined;
+
+    _renderCompositeHook: RenderCompositeHook | null = null;
+    _renderCompositeHookNextId = 0;
+
+    _renderWithCompositeHookInProgress = false;
+    _pendingRenderCompositeHookId: number | null = null;
+    _pendingRenderCompositeHookRepaintRequested = false;
 
     /**
      * @internal
@@ -2099,6 +2107,17 @@ export class Map extends Camera {
         return this;
     }
 
+    /**
+     * Sets the async callback to run during each render before composite layer rendering.
+     * When set, the presentation of the rendered frame will be deferred until the hook promise resolves.
+     *
+     * @param renderCompositeHook - The async render composite callback, or `null` to disable it.
+     */
+    setRenderCompositeHook(renderCompositeHook: RenderCompositeHook | null): this {
+        this._renderCompositeHook = renderCompositeHook;
+        return this;
+    }
+
     _getUIString(key: keyof typeof defaultLocale) {
         const str = this._locale[key];
         if (str == null) {
@@ -2116,6 +2135,8 @@ export class Map extends Camera {
             this.style.once('style.load', () => this._updateStyle(style, options));
             return;
         }
+
+        this._abortPendingRenderCompositeHookPresent();
 
         const previousStyle = this.style && options.transformStyle ? this.style.serialize() : undefined;
         if (this.style) {
@@ -3500,6 +3521,7 @@ export class Map extends Camera {
             this._frameRequest.abort();
             this._frameRequest = null;
         }
+        this._abortPendingRenderCompositeHookPresent();
         this.painter.destroy();
 
         this._lostContextStyle = this._getStyleAndImages();
@@ -3601,6 +3623,34 @@ export class Map extends Camera {
         this._renderTaskQueue.remove(id);
     }
 
+    _abortPendingRenderCompositeHookPresent() {
+        this._pendingRenderCompositeHookId = null;
+    }
+
+    _scheduleRenderCompositeHookPresent(renderCompositeHookPromise: Promise<unknown>) {
+        const id = this._renderCompositeHookNextId;
+        this._renderCompositeHookNextId++;
+
+        this._pendingRenderCompositeHookId = id;
+
+        renderCompositeHookPromise
+            .then(() => {
+                if (id !== this._pendingRenderCompositeHookId || this._removed) return;
+                this.painter.present();
+            })
+            .catch(console.error)
+            .finally(() => {
+                if (id !== this._pendingRenderCompositeHookId) return;
+
+                this._pendingRenderCompositeHookId = null;
+
+                if (this._pendingRenderCompositeHookRepaintRequested) {
+                    this._pendingRenderCompositeHookRepaintRequested = false;
+                    this.triggerRepaint();
+                }
+            });
+    }
+
     /**
      * @internal
      * Call when a (re-)render of the map is required:
@@ -3613,6 +3663,11 @@ export class Map extends Camera {
      * @param paintStartTimeStamp - The time when the animation frame began executing.
      */
     _render(paintStartTimeStamp: number) {
+        this._abortPendingRenderCompositeHookPresent();
+
+        const renderCompositeHook = this._renderCompositeHook;
+        this._renderWithCompositeHookInProgress = renderCompositeHook !== null;
+
         const fadeDuration = this._idleTriggered ? this._fadeDuration : 0;
 
         const isGlobeRendering = this.style.projection?.transitionState > 0;
@@ -3681,17 +3736,35 @@ export class Map extends Camera {
 
         this._placementDirty = this.style?._updatePlacement(this.transform, this.showCollisionBoxes, fadeDuration, this._crossSourceCollisions, globeRenderingChanged);
 
+        const renderCompositeHookPromise = renderCompositeHook ? renderCompositeHook(this.transform.clone()) : null;
+
+        if (this._removed) {
+            this._renderWithCompositeHookInProgress = false;
+            return;
+        }
+
         // Actually draw
-        this.painter.render(this.style, {
-            showTileBoundaries: this.showTileBoundaries,
-            showOverdrawInspector: this._showOverdrawInspector,
-            rotating: this.isRotating(),
-            zooming: this.isZooming(),
-            moving: this.isMoving(),
-            fadeDuration,
-            showPadding: this.showPadding,
-            anisotropicFilterPitch: this.getAnisotropicFilterPitch(),
-        });
+        try {
+            this.painter.render(this.style, {
+                showTileBoundaries: this.showTileBoundaries,
+                showOverdrawInspector: this._showOverdrawInspector,
+                rotating: this.isRotating(),
+                zooming: this.isZooming(),
+                moving: this.isMoving(),
+                fadeDuration,
+                showPadding: this.showPadding,
+                anisotropicFilterPitch: this.getAnisotropicFilterPitch(),
+                deferPresent: renderCompositeHook !== null,
+            });
+        } catch (error) {
+            this._renderWithCompositeHookInProgress = false;
+            throw error;
+        }
+
+        if (renderCompositeHookPromise) {
+            this._scheduleRenderCompositeHookPresent(renderCompositeHookPromise);
+            this._renderWithCompositeHookInProgress = false;
+        }
 
         this.fire(new Event('render'));
 
@@ -3739,6 +3812,8 @@ export class Map extends Camera {
      */
     redraw(): this {
         if (this.style) {
+            this._abortPendingRenderCompositeHookPresent();
+
             // cancel the scheduled update
             if (this._frameRequest) {
                 this._frameRequest.abort();
@@ -3768,6 +3843,7 @@ export class Map extends Camera {
             this._frameRequest.abort();
             this._frameRequest = null;
         }
+        this._abortPendingRenderCompositeHookPresent();
         this._renderTaskQueue.clear();
         this._diffStyleRequest?.abort();
         this.painter.destroy();
@@ -3806,7 +3882,15 @@ export class Map extends Camera {
      * @see [Add an animated icon to the map](https://maplibre.org/maplibre-gl-js/docs/examples/add-an-animated-icon-to-the-map/)
      */
     triggerRepaint() {
-        if (this.style && !this._frameRequest) {
+        if (!this.style) return;
+
+        // repaint deferred until deferred compositing has concluded, which clears the repaint flag and schedules the repaint
+        if (this._renderWithCompositeHookInProgress || this._pendingRenderCompositeHookId !== null) {
+            this._pendingRenderCompositeHookRepaintRequested = true;
+            return;
+        }
+
+        if (!this._frameRequest) {
             this._frameRequest = new AbortController();
             browser.frame(
                 this._frameRequest,

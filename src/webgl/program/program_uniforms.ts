@@ -12,6 +12,7 @@ import {symbolIconUniforms, symbolSDFUniforms, symbolTextAndIconUniforms} from '
 import {backgroundUniforms, backgroundPatternUniforms} from './background_program';
 import {terrainUniforms, terrainDepthUniforms, terrainCoordsUniforms} from './terrain_program';
 import {projectionErrorMeasurementUniforms} from './projection_error_measurement_program';
+import {presentUniforms} from './present_program';
 import {atmosphereUniforms} from './atmosphere_program';
 import {skyUniforms} from './sky_program';
 
@@ -50,6 +51,7 @@ export const programUniforms = {
     terrainDepth: terrainDepthUniforms,
     terrainCoords: terrainCoordsUniforms,
     projectionErrorMeasurement: projectionErrorMeasurementUniforms,
+    present: presentUniforms,
     atmosphere: atmosphereUniforms,
     sky: skyUniforms
 };

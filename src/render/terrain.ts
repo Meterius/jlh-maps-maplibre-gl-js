@@ -390,7 +390,7 @@ export class Terrain {
         // grab coordinate pixel from coordinates framebuffer
         context.bindFramebuffer.set(this.getFramebuffer('coords').framebuffer);
         gl.readPixels(px, fbHeight - py - 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
-        context.bindFramebuffer.set(null);
+        this.painter.bindRenderTargetFramebuffer();
         // decode coordinates (encoding see getCoordsTexture)
         const x = rgba[0] + ((rgba[2] >> 4) << 8);
         const y = rgba[1] + ((rgba[2] & 15) << 8);
@@ -421,7 +421,7 @@ export class Terrain {
         const context = this.painter.context, gl = context.gl;
         context.bindFramebuffer.set(this.getFramebuffer('depth').framebuffer);
         gl.readPixels(p.x, this.painter.height / devicePixelRatio - p.y - 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
-        context.bindFramebuffer.set(null);
+        this.painter.bindRenderTargetFramebuffer();
         // decode coordinates (encoding see terran_depth.fragment.glsl)
         return (rgba[0] / (256 * 256 * 256) + rgba[1] / (256 * 256) + rgba[2] / 256 + rgba[3]) / 256;
     }

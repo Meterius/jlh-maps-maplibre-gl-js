@@ -309,8 +309,9 @@ describe('setStyle', () => {
         await map.once('style.load');
 
         expect(transformRequestSpy).toHaveBeenCalledWith('style.json', 'Style');
-        expect(server.requests[0].url).toBe('style.json');
-        expect(server.requests[0].requestHeaders.Authorization).toBe('Bearer token');
+        const styleRequest = server.requests.find(request => request.url === 'style.json');
+        expect(styleRequest).toBeTruthy();
+        expect(styleRequest.requestHeaders.Authorization).toBe('Bearer token');
     });
 
     test('transformStyle should get called when passed to setStyle after the map is initialised without a style', async () => {

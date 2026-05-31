@@ -70,6 +70,7 @@ describe('render to texture', () => {
         colorModeForRenderPass: () => ColorMode.alphaBlended,
         getDepthModeFor3D: () => DepthMode.disabled,
         useProgram: () => ({draw: () => { layersDrawn++; }}),
+        bindRenderTargetFramebuffer: vi.fn(),
         _renderTileClippingMasks: vi.fn(),
         renderLayer: vi.fn(),
         drawFunctions: {

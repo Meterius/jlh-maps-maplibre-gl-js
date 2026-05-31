@@ -67,6 +67,8 @@ import projectionErrorMeasurementVert from './glsl/projection_error_measurement.
 import projectionErrorMeasurementFrag from './glsl/projection_error_measurement.fragment.glsl.g';
 import projectionMercatorVert from './glsl/_projection_mercator.vertex.glsl.g';
 import projectionGlobeVert from './glsl/_projection_globe.vertex.glsl.g';
+import presentFrag from './glsl/present.fragment.glsl.g';
+import presentVert from './glsl/present.vertex.glsl.g';
 import atmosphereFrag from './glsl/atmosphere.fragment.glsl.g';
 import atmosphereVert from './glsl/atmosphere.vertex.glsl.g';
 import skyFrag from './glsl/sky.fragment.glsl.g';
@@ -115,6 +117,7 @@ export const shaders = {
     terrainDepth: prepare(terrainDepthFrag, terrainVertDepth),
     terrainCoords: prepare(terrainCoordsFrag, terrainVertCoords),
     projectionErrorMeasurement: prepare(projectionErrorMeasurementFrag, projectionErrorMeasurementVert),
+    present: prepare(presentFrag, presentVert),
     atmosphere: prepare(atmosphereFrag, atmosphereVert),
     sky: prepare(skyFrag, skyVert),
 };

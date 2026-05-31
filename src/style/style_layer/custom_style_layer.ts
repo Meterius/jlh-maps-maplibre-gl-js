@@ -199,6 +199,10 @@ export interface CustomLayerInterface {
      */
     renderingMode?: '2d' | '3d';
     /**
+     * When true, the layer splits the main map render into separate render target framebuffers.
+     */
+    compositeSeperator?: boolean;
+    /**
      * Called during a render frame allowing the layer to draw into the GL context.
      *
      * The layer can assume blending and depth state is set to allow the layer to properly
@@ -215,6 +219,10 @@ export interface CustomLayerInterface {
      * `gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA)`.
      */
     render: CustomRenderMethod;
+    /**
+     * Optional method called during the composite pass for custom layers.
+     */
+    renderComposite?: CustomRenderMethod;
     /**
      * Optional method called during a render frame to allow a layer to prepare resources or render into a texture.
      *

@@ -31,7 +31,7 @@ function drawDepth(painter: Painter, terrain: Terrain) {
         const uniformValues = terrainDepthUniformValues(terrain.getMeshFrameDelta(tr.zoom));
         program.draw(context, gl.TRIANGLES, depthMode, StencilMode.disabled, colorMode, CullFaceMode.backCCW, uniformValues, terrainData, projectionData, 'terrain', mesh.vertexBuffer, mesh.indexBuffer, mesh.segments);
     }
-    context.bindFramebuffer.set(null);
+    painter.bindRenderTargetFramebuffer();
     context.viewport.set([0, 0, painter.width, painter.height]);
 }
 
@@ -65,7 +65,7 @@ function drawCoords(painter: Painter, terrain: Terrain) {
         program.draw(context, gl.TRIANGLES, depthMode, StencilMode.disabled, colorMode, CullFaceMode.backCCW, uniformValues, terrainData, projectionData, 'terrain', mesh.vertexBuffer, mesh.indexBuffer, mesh.segments);
         terrain.coordsIndex.push(tile.tileID.key);
     }
-    context.bindFramebuffer.set(null);
+    painter.bindRenderTargetFramebuffer();
     context.viewport.set([0, 0, painter.width, painter.height]);
 }
 
@@ -78,7 +78,7 @@ function drawTerrain(painter: Painter, terrain: Terrain, tiles: Tile[], renderOp
     const depthMode = painter.getDepthModeFor3D();
     const program = painter.useProgram('terrain');
 
-    context.bindFramebuffer.set(null);
+    painter.bindRenderTargetFramebuffer();
     context.viewport.set([0, 0, painter.width, painter.height]);
 
     for (const tile of tiles) {

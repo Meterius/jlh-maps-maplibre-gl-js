@@ -4,6 +4,7 @@ import {MercatorTransform} from '../geo/projection/mercator_transform';
 import {Style} from '../style/style';
 import {StubMap} from '../util/test/util';
 import {Texture} from '../webgl/texture';
+import {ColorMode} from '../webgl/color_mode';
 
 describe('render', () => {
     let painter: Painter;
@@ -29,6 +30,7 @@ describe('render', () => {
         style = new Style(map);
         style._setProjectionInternal('mercator');
         style._updatePlacement(transform, false, 0, false);
+        painter.style = style;
     });
 
     test('must not fail with incompletely loaded style', () => {
@@ -44,6 +46,130 @@ describe('render', () => {
 
         expect(terrainDepth).toHaveBeenCalled();
         expect(terrainCoords).not.toHaveBeenCalled();
+    });
+
+    test('deferred present uses a fallback render target without composite layers', () => {
+        vi.spyOn(painter.context.gl, 'checkFramebufferStatus').mockReturnValue(painter.context.gl.FRAMEBUFFER_COMPLETE);
+
+        painter.render(style, {...renderOptions, deferPresent: true});
+
+        expect(painter.renderTargetFramebuffers).toHaveLength(1);
+        expect(painter.nextPresentOptions).toEqual({
+            renderOptions: {isRenderingToTexture: false, isRenderingGlobe: false},
+            compositeLayersToRenderTarget: [[]],
+        });
+    });
+
+    test('syncs render target framebuffers to required composite segment count', () => {
+        vi.spyOn(painter.context.gl, 'checkFramebufferStatus').mockReturnValue(painter.context.gl.FRAMEBUFFER_COMPLETE);
+        painter.resize(64, 32, 2);
+
+        painter._syncRenderTargetFramebuffers(2);
+
+        expect(painter.renderTargetFramebuffers).toHaveLength(2);
+        expect(painter.renderTargetFramebuffers[0].width).toBe(128);
+        expect(painter.renderTargetFramebuffers[0].height).toBe(64);
+        expect(painter.renderTargetFramebuffer).toBe(painter.renderTargetFramebuffers[0]);
+
+        painter.resize(32, 16, 1);
+
+        expect(painter.renderTargetFramebuffers[0].width).toBe(32);
+        expect(painter.renderTargetFramebuffers[0].height).toBe(16);
+
+        painter._syncRenderTargetFramebuffers(0);
+
+        expect(painter.renderTargetFramebuffers).toHaveLength(0);
+        expect(painter.renderTargetFramebuffer).toBeNull();
+    });
+
+    test('includes hidden composite separators when preparing present options', () => {
+        const hiddenSeparator = {
+            type: 'custom',
+            implementation: {compositeSeperator: true},
+            isHidden: () => true,
+        };
+        painter.style = {
+            _layers: {
+                hiddenSeparator,
+            },
+        } as any;
+
+        expect((painter as any)._createPresentOptions(['hiddenSeparator'], {isRenderingToTexture: false, isRenderingGlobe: false}, false)).toEqual({
+            renderOptions: {isRenderingToTexture: false, isRenderingGlobe: false},
+            compositeLayersToRenderTarget: [[], []],
+        });
+    });
+
+    test('prepares a single render target when present is deferred without composite layers', () => {
+        painter.style = {
+            _layers: {},
+        } as any;
+
+        expect((painter as any)._createPresentOptions([], {isRenderingToTexture: false, isRenderingGlobe: false}, true)).toEqual({
+            renderOptions: {isRenderingToTexture: false, isRenderingGlobe: false},
+            compositeLayersToRenderTarget: [[]],
+        });
+    });
+
+    test('assigns non-separator composite layers to the current render target', () => {
+        const separator = {
+            type: 'custom',
+            implementation: {compositeSeperator: true},
+        };
+        const beforeSeparatorComposite = {
+            type: 'custom',
+            implementation: {renderComposite: () => {}},
+        };
+        const afterSeparatorComposite = {
+            type: 'custom',
+            implementation: {renderComposite: () => {}},
+        };
+        painter.style = {
+            _layers: {
+                beforeSeparatorComposite,
+                separator,
+                afterSeparatorComposite,
+            },
+        } as any;
+
+        expect((painter as any)._createPresentOptions([
+            'beforeSeparatorComposite',
+            'separator',
+            'afterSeparatorComposite',
+        ], {isRenderingToTexture: false, isRenderingGlobe: false}, false)).toEqual({
+            renderOptions: {isRenderingToTexture: false, isRenderingGlobe: false},
+            compositeLayersToRenderTarget: [['beforeSeparatorComposite'], ['afterSeparatorComposite']],
+        });
+    });
+
+    test('present composites render targets with the present program and alpha blending', () => {
+        const texture = {} as WebGLTexture;
+        const drawSpy = vi.fn();
+        const useProgramSpy = vi.spyOn(painter, 'useProgram').mockReturnValue({draw: drawSpy} as any);
+
+        painter._drawRenderTargetFramebuffer({
+            colorAttachment: {
+                get: () => texture,
+            },
+        } as any);
+
+        expect(useProgramSpy).toHaveBeenCalledWith('present', null, true);
+        expect(drawSpy.mock.calls[0][4]).toBe(ColorMode.alphaBlended);
+    });
+
+    test('present throws without prepared present options', () => {
+        expect(() => painter.present()).toThrow('Cannot present without prepared present options');
+    });
+
+    test('present consumes prepared present options', () => {
+        painter.nextPresentOptions = {
+            renderOptions: {isRenderingToTexture: false, isRenderingGlobe: false},
+            compositeLayersToRenderTarget: [],
+        };
+
+        painter.present();
+
+        expect(painter.nextPresentOptions).toBeNull();
     });
 });
 

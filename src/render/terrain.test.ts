@@ -43,6 +43,7 @@ describe('Terrain', () => {
             transform: {center: {lng: 0}},
             maybeDrawDepth: vi.fn(),
             maybeDrawCoords: vi.fn(),
+            bindRenderTargetFramebuffer: vi.fn(),
         } as any as Painter;
         const tileManager = {_source: {tileSize: 512}} as TileManager;
         const getTileByID = (tileID) : Tile => {
@@ -73,6 +74,7 @@ describe('Terrain', () => {
             height: 1,
             maybeDrawDepth: vi.fn(),
             maybeDrawCoords: vi.fn(),
+            bindRenderTargetFramebuffer: vi.fn(),
             pixelRatio,
         } as any as Painter;
         const tileManager = {_source: {tileSize: 512}} as TileManager;

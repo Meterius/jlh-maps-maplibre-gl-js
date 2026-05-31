@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Validate composite rendering with a deferred hook</title>
+    <meta property="og:description" content="Use a custom layer to validate split framebuffer compositing and a deferred render composite hook." />
+    <meta property="og:created" content="2026-05-31" />
+    <meta charset='utf-8'>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel='stylesheet' href='../../dist/maplibre-gl.css' />
+    <script src='../../dist/maplibre-gl-dev.js'></script>
+    <style>
+        body { margin: 0; padding: 0; }
+        html, body, #map { height: 100%; }
+    </style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+    const map = new maplibregl.Map({
+        container: 'map',
+        center: [0, 0],
+        zoom: 2,
+        style: {
+            version: 8,
+            sources: {},
+            layers: [
+                {
+                    id: 'background',
+                    type: 'background',
+                    paint: {
+                        'background-color': '#f4f4ef'
+                    }
+                }
+            ]
+        }
+    });
+
+    map.setRenderCompositeHook(() => new Promise((resolve) => setTimeout(resolve, 20)));
+
+    const rectangles = {
+        type: 'FeatureCollection',
+        features: [
+            {
+                type: 'Feature',
+                properties: {part: 'top'},
+                geometry: {
+                    type: 'Polygon',
+                    coordinates: [[
+                        [-55, 0],
+                        [55, 0],
+                        [55, 32],
+                        [-55, 32],
+                        [-55, 0]
+                    ]]
+                }
+            },
+            {
+                type: 'Feature',
+                properties: {part: 'bottom'},
+                geometry: {
+                    type: 'Polygon',
+                    coordinates: [[
+                        [-55, -32],
+                        [55, -32],
+                        [55, 0],
+                        [-55, 0],
+                        [-55, -32]
+                    ]]
+                }
+            }
+        ]
+    };
+
+    const compositeProbeLayer = {
+        id: 'composite-probe',
+        type: 'custom',
+        renderingMode: '2d',
+        compositeSeperator: true,
+
+        onAdd(map, gl) {
+            this.map = map;
+
+            const vertexSource = `
+                attribute vec2 a_pos;
+                uniform mat4 u_matrix;
+                uniform float u_size;
+
+                void main() {
+                    gl_Position = u_matrix * vec4(a_pos, 0.0, 1.0);
+                    gl_PointSize = u_size;
+                }`;
+
+            const fragmentSource = `
+                precision mediump float;
+                uniform vec4 u_color;
+
+                void main() {
+                    float distanceFromCenter = length(gl_PointCoord - vec2(0.5));
+                    float alpha = 1.0 - smoothstep(0.46, 0.5, distanceFromCenter);
+                    gl_FragColor = vec4(u_color.rgb, u_color.a * alpha);
+                }`;
+
+            const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+            gl.shaderSource(vertexShader, vertexSource);
+            gl.compileShader(vertexShader);
+
+            const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+            gl.shaderSource(fragmentShader, fragmentSource);
+            gl.compileShader(fragmentShader);
+
+            this.program = gl.createProgram();
+            gl.attachShader(this.program, vertexShader);
+            gl.attachShader(this.program, fragmentShader);
+            gl.linkProgram(this.program);
+
+            gl.deleteShader(vertexShader);
+            gl.deleteShader(fragmentShader);
+
+            this.aPos = gl.getAttribLocation(this.program, 'a_pos');
+            this.matrixUniform = gl.getUniformLocation(this.program, 'u_matrix');
+            this.sizeUniform = gl.getUniformLocation(this.program, 'u_size');
+            this.colorUniform = gl.getUniformLocation(this.program, 'u_color');
+
+            const left = maplibregl.MercatorCoordinate.fromLngLat({lng: -20, lat: 0});
+            const right = maplibregl.MercatorCoordinate.fromLngLat({lng: 20, lat: 0});
+
+            this.buffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
+            gl.bufferData(
+                gl.ARRAY_BUFFER,
+                new Float32Array([
+                    left.x,
+                    left.y,
+                    right.x,
+                    right.y
+                ]),
+                gl.STATIC_DRAW
+            );
+        },
+
+        animatedSize(phase) {
+            return 82 + Math.sin(performance.now() / 450 + phase) * 10;
+        },
+
+        drawCircle(gl, args, pointOffset, color, phase) {
+            gl.useProgram(this.program);
+            gl.uniformMatrix4fv(this.matrixUniform, false, args.defaultProjectionData.mainMatrix);
+            gl.uniform1f(this.sizeUniform, this.animatedSize(phase));
+            gl.uniform4fv(this.colorUniform, color);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
+            gl.enableVertexAttribArray(this.aPos);
+            gl.vertexAttribPointer(this.aPos, 2, gl.FLOAT, false, 0, 0);
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+            gl.drawArrays(gl.POINTS, pointOffset, 1);
+        },
+
+        render(gl, args) {
+            this.drawCircle(gl, args, 0, [1, 0, 0, 0.74], 0);
+            this.map.triggerRepaint();
+        },
+
+        renderComposite(gl, args) {
+            this.drawCircle(gl, args, 1, [0, 0.72, 0.14, 0.74], Math.PI);
+        },
+
+        onRemove(map, gl) {
+            gl.deleteBuffer(this.buffer);
+            gl.deleteProgram(this.program);
+        }
+    };
+
+    map.on('load', () => {
+        map.addSource('rectangles', {
+            type: 'geojson',
+            data: rectangles
+        });
+
+        map.addLayer({
+            id: 'top-rectangle-before-custom-layer',
+            type: 'fill',
+            source: 'rectangles',
+            filter: ['==', ['get', 'part'], 'top'],
+            paint: {
+                'fill-color': '#2d7ff9',
+                'fill-opacity': 0.9
+            }
+        });
+
+        map.addLayer(compositeProbeLayer);
+
+        map.addLayer({
+            id: 'bottom-rectangle-after-custom-layer',
+            type: 'fill',
+            source: 'rectangles',
+            filter: ['==', ['get', 'part'], 'bottom'],
+            paint: {
+                'fill-color': '#ffd43b',
+                'fill-opacity': 0.9
+            }
+        });
+    });
+</script>
+</body>
+</html>

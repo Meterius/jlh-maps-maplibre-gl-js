@@ -21,8 +21,7 @@ vi.mock('../../data/bucket/symbol_bucket', () => {
 vi.mock('../../symbol/projection');
 
 describe('drawCustom', () => {
-    test('should return custom render method inputs', () => {
-        // same transform setup as in transform.test.ts 'creates a transform', so matrices of transform should be the same
+    function createMockPainter(renderPass: Painter['renderPass']) {
         const transform = new MercatorTransform({minZoom: 0, maxZoom: 22, minPitch: 0, maxPitch: 60, renderWorldCopies: true});
         transform.resize(500, 500);
         transform.setMinPitch(10);
@@ -31,7 +30,7 @@ describe('drawCustom', () => {
         mockPainter.style = {
             projection: new MercatorProjection(),
         } as any;
-        mockPainter.renderPass = 'translucent';
+        mockPainter.renderPass = renderPass;
         mockPainter.transform = transform;
         mockPainter.context = {
             gl: {},
@@ -43,6 +42,12 @@ describe('drawCustom', () => {
                 set: () => {}
             }
         } as any;
+        return mockPainter;
+    }
+
+    test('should return custom render method inputs', () => {
+        // same transform setup as in transform.test.ts 'creates a transform', so matrices of transform should be the same
+        const mockPainter = createMockPainter('translucent');
 
         const tileId = new OverscaledTileID(1, 0, 1, 0, 0);
         const tile = new Tile(tileId, 256);
@@ -75,5 +80,25 @@ describe('drawCustom', () => {
         expect(result.args.modelViewProjectionMatrix).toEqual(mockPainter.transform.modelViewProjectionMatrix);
         expect(result.args.projectionMatrix).toEqual(mockPainter.transform.projectionMatrix);
         // JP: TODO: test projection args
+    });
+
+    test('composite pass invokes renderComposite instead of render', () => {
+        const mockPainter = createMockPainter('composite');
+        const tileManagerMock = new TileManager(null, null, null);
+        const render = vi.fn();
+        const renderComposite = vi.fn();
+        const mockLayer = new CustomStyleLayer({
+            id: 'custom-layer',
+            type: 'custom',
+            compositeSeperator: true,
+            render,
+            renderComposite,
+        }, {});
+        const renderOptions: RenderOptions = {isRenderingToTexture: false, isRenderingGlobe: false};
+
+        drawCustom(mockPainter, tileManagerMock, mockLayer, renderOptions);
+
+        expect(render).not.toHaveBeenCalled();
+        expect(renderComposite).toHaveBeenCalled();
     });
 });

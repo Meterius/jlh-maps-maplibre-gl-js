@@ -1,6 +1,7 @@
 import {beforeEach, afterEach, test, expect, vi} from 'vitest';
 import {createMap, beforeMapTest, createStyle, sleep} from '../../util/test/util';
 import {fakeServer, type FakeServer} from 'nise';
+import {browser} from '../../util/browser';
 
 let server: FakeServer;
 
@@ -88,4 +89,175 @@ test('redraw', async () => {
 
     map.redraw();
     await renderPromise;
+});
+
+test('renderCompositeHook defers present until hook resolves', async () => {
+    const map = createMap({style: createStyle()});
+    await map.once('idle');
+
+    let resolveHook!: () => void;
+    const hookPromise = new Promise<void>(resolve => { resolveHook = resolve; });
+    const renderCompositeHook = vi.fn((_transform: unknown) => hookPromise);
+    map.setRenderCompositeHook(renderCompositeHook);
+
+    const renderSpy = vi.spyOn(map.painter, 'render').mockImplementation((_style, options) => {
+        expect(options.deferPresent).toBe(true);
+        map.painter.renderTargetFramebuffers = [{destroy: vi.fn()} as any];
+    });
+    const presentSpy = vi.spyOn(map.painter, 'present').mockImplementation(() => {});
+
+    map._render(0);
+
+    expect(renderCompositeHook).toHaveBeenCalledTimes(1);
+    expect(renderCompositeHook.mock.calls[0][0]).not.toBe(map.transform);
+    expect(renderSpy).toHaveBeenCalledTimes(1);
+    expect(presentSpy).not.toHaveBeenCalled();
+
+    resolveHook();
+    await sleep(0);
+
+    expect(presentSpy).toHaveBeenCalled();
+
+    map.remove();
+});
+
+test('redraw aborts pending composite present and starts a new render', async () => {
+    const map = createMap({style: createStyle()});
+    await map.once('idle');
+
+    const hookResolves: Array<() => void> = [];
+    map.setRenderCompositeHook(vi.fn(() => new Promise<void>(resolve => {
+        hookResolves.push(resolve);
+    })));
+
+    const renderSpy = vi.spyOn(map.painter, 'render').mockImplementation((_style, options) => {
+        expect(options.deferPresent).toBe(true);
+        map.painter.renderTargetFramebuffers = [{destroy: vi.fn()} as any];
+    });
+    const presentSpy = vi.spyOn(map.painter, 'present').mockImplementation(() => {});
+
+    map._render(0);
+    map.redraw();
+
+    expect(renderSpy).toHaveBeenCalledTimes(2);
+
+    hookResolves[0]();
+    await sleep(0);
+    expect(presentSpy).not.toHaveBeenCalled();
+
+    hookResolves[1]();
+    await sleep(0);
+    expect(presentSpy).toHaveBeenCalledTimes(1);
+
+    map.remove();
+});
+
+test('triggerRepaint waits for pending composite present before scheduling the next render', async () => {
+    const map = createMap({style: createStyle()});
+    await map.once('idle');
+
+    let resolveFirstHook!: () => void;
+    let hookCallCount = 0;
+    map.setRenderCompositeHook(vi.fn(() => {
+        hookCallCount++;
+        if (hookCallCount === 1) {
+            return new Promise<void>(resolve => { resolveFirstHook = resolve; });
+        }
+        return Promise.resolve();
+    }));
+
+    const renderSpy = vi.spyOn(map.painter, 'render').mockImplementation((_style, options) => {
+        expect(options.deferPresent).toBe(true);
+        map.painter.renderTargetFramebuffers = [{destroy: vi.fn()} as any];
+    });
+    const presentSpy = vi.spyOn(map.painter, 'present').mockImplementation(() => {});
+    let scheduledFrame: ((paintStartTimestamp: number) => void) | undefined;
+    const frameSpy = vi.spyOn(browser, 'frame').mockImplementation((_abortController, frame) => {
+        scheduledFrame = frame;
+    });
+
+    map._render(0);
+    map.triggerRepaint();
+
+    expect(frameSpy).not.toHaveBeenCalled();
+    expect(renderSpy).toHaveBeenCalledTimes(1);
+
+    resolveFirstHook();
+    await sleep(0);
+
+    expect(presentSpy).toHaveBeenCalled();
+    expect(frameSpy).toHaveBeenCalledTimes(1);
+    expect(renderSpy).toHaveBeenCalledTimes(1);
+
+    expect(scheduledFrame).toBeDefined();
+    scheduledFrame(0);
+    expect(renderSpy).toHaveBeenCalledTimes(2);
+
+    frameSpy.mockRestore();
+    map.remove();
+});
+
+test('triggerRepaint from render task queue waits for composite present', async () => {
+    const map = createMap({style: createStyle()});
+    await map.once('idle');
+
+    let resolveHook!: () => void;
+    map.setRenderCompositeHook(vi.fn(() => {
+        return new Promise<void>(resolve => { resolveHook = resolve; });
+    }));
+
+    vi.spyOn(map.painter, 'render').mockImplementation((_style, options) => {
+        expect(options.deferPresent).toBe(true);
+        map.painter.renderTargetFramebuffers = [{destroy: vi.fn()} as any];
+    });
+    const presentSpy = vi.spyOn(map.painter, 'present').mockImplementation(() => {});
+    const frameSpy = vi.spyOn(browser, 'frame').mockImplementation(() => {});
+
+    map._renderTaskQueue.add(() => {
+        map.triggerRepaint();
+    });
+
+    map._render(0);
+
+    expect(frameSpy).not.toHaveBeenCalled();
+
+    resolveHook();
+    await sleep(0);
+
+    expect(presentSpy).toHaveBeenCalled();
+    expect(frameSpy).toHaveBeenCalledTimes(1);
+
+    frameSpy.mockRestore();
+    map.remove();
+});
+
+test('triggerRepaint from renderCompositeHook waits for pending composite present', async () => {
+    const map = createMap({style: createStyle()});
+    await map.once('idle');
+
+    let resolveHook!: () => void;
+    map.setRenderCompositeHook(vi.fn(() => {
+        map.triggerRepaint();
+        return new Promise<void>(resolve => { resolveHook = resolve; });
+    }));
+
+    vi.spyOn(map.painter, 'render').mockImplementation((_style, options) => {
+        expect(options.deferPresent).toBe(true);
+        map.painter.renderTargetFramebuffers = [{destroy: vi.fn()} as any];
+    });
+    const presentSpy = vi.spyOn(map.painter, 'present').mockImplementation(() => {});
+    const frameSpy = vi.spyOn(browser, 'frame').mockImplementation(() => {});
+
+    map._render(0);
+
+    expect(frameSpy).not.toHaveBeenCalled();
+
+    resolveHook();
+    await sleep(0);
+
+    expect(presentSpy).toHaveBeenCalled();
+    expect(frameSpy).toHaveBeenCalledTimes(1);
+
+    frameSpy.mockRestore();
+    map.remove();
 });

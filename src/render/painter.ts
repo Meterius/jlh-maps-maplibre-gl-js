@@ -11,6 +11,7 @@ import {CrossTileSymbolIndex} from '../symbol/cross_tile_symbol_index';
 import {shaders} from '../shaders/shaders';
 import {Program} from '../webgl/program';
 import {programUniforms} from '../webgl/program/program_uniforms';
+import {presentUniformValues} from '../webgl/program/present_program';
 import {Context} from '../webgl/context';
 import {DepthMode} from '../webgl/depth_mode';
 import {StencilMode} from '../webgl/stencil_mode';
@@ -33,6 +34,7 @@ import type {GlyphManager} from './glyph_manager';
 import type {VertexBuffer} from '../webgl/vertex_buffer';
 import type {IndexBuffer} from '../webgl/index_buffer';
 import type {DepthRangeType, DepthMaskType, DepthFuncType} from '../webgl/types';
+import type {Framebuffer} from '../webgl/framebuffer';
 import type {ResolvedImage} from '@maplibre/maplibre-gl-style-spec';
 import type {IRenderToTexture} from './render_to_texture_interface';
 import type {ProjectionData} from '../geo/projection/projection_data';
@@ -49,7 +51,7 @@ import {isRasterStyleLayer} from '../style/style_layer/raster_style_layer';
 import {isBackgroundStyleLayer} from '../style/style_layer/background_style_layer';
 import {isCustomStyleLayer} from '../style/style_layer/custom_style_layer';
 
-export type RenderPass = 'offscreen' | 'opaque' | 'translucent';
+export type RenderPass = 'offscreen' | 'opaque' | 'translucent' | 'composite';
 
 type PainterOptions = {
     showOverdrawInspector: boolean;
@@ -60,11 +62,17 @@ type PainterOptions = {
     moving: boolean;
     fadeDuration: number;
     anisotropicFilterPitch: number;
+    deferPresent?: boolean;
 };
 
 export type RenderOptions = {
     isRenderingToTexture: boolean;
     isRenderingGlobe: boolean;
+};
+
+type PresentOptions = {
+    renderOptions: RenderOptions;
+    compositeLayersToRenderTarget: string[][];
 };
 
 /**
@@ -110,6 +118,14 @@ export class Painter {
     depthRangeFor3D: DepthRangeType;
     opaquePassCutoff: number;
     renderPass: RenderPass;
+
+    renderTargetFramebuffer: Framebuffer | null;
+    renderTargetFramebuffers: Framebuffer[];
+
+    // contains present options initialized by render and consumed by present
+    nextPresentOptions: PresentOptions | null = null;
+    nextPresentInvalid = false;
+
     currentLayer: number;
     currentStencilSource: string;
     nextStencilID: number;
@@ -131,6 +147,8 @@ export class Painter {
         this.transform = transform;
         this._tileTextures = {};
         this.terrainFacilitator = {depthDirty: true, coordsDirty: false, matrix: mat4.identity(new Float64Array(16) as any), renderTime: 0};
+        this.renderTargetFramebuffers = [];
+        this.renderTargetFramebuffer = null;
 
         this.setup();
 
@@ -151,6 +169,7 @@ export class Painter {
         this.height = Math.floor(height * pixelRatio);
         this.pixelRatio = pixelRatio;
         this.context.viewport.set([0, 0, this.width, this.height]);
+        this._resizeRenderTargetFramebuffers();
 
         if (this.style) {
             for (const layerId of this.style._order) {
@@ -219,6 +238,198 @@ export class Painter {
         this.stencilClearMode = new StencilMode({func: gl.ALWAYS, mask: 0}, 0x0, 0xFF, gl.ZERO, gl.ZERO, gl.ZERO);
 
         this.tileExtentMesh = new Mesh(this.tileExtentBuffer, this.quadTriangleIndexBuffer, this.tileExtentSegments);
+    }
+
+    _createRenderTargetFramebuffer(width: number, height: number): Framebuffer {
+        const context = this.context;
+        const gl = context.gl;
+        const targetWidth = Math.max(1, Math.floor(width));
+        const targetHeight = Math.max(1, Math.floor(height));
+        const framebuffer = context.createFramebuffer(targetWidth, targetHeight, true, true);
+        const texture = new Texture(context, {width: targetWidth, height: targetHeight, data: null}, gl.RGBA, {premultiply: false});
+
+        texture.bind(gl.LINEAR, gl.CLAMP_TO_EDGE);
+        framebuffer.depthAttachment.set(context.createRenderbuffer(gl.DEPTH_STENCIL, targetWidth, targetHeight));
+        framebuffer.colorAttachment.set(texture.texture);
+        context.bindFramebuffer.setDefault();
+
+        return framebuffer;
+    }
+
+    _resizeRenderTargetFramebuffers() {
+        const activeTargetIndex = this.renderTargetFramebuffer ?
+            this.renderTargetFramebuffers.indexOf(this.renderTargetFramebuffer) :
+            -1;
+        const targetWidth = Math.max(1, Math.floor(this.width));
+        const targetHeight = Math.max(1, Math.floor(this.height));
+
+        this.renderTargetFramebuffers = this.renderTargetFramebuffers.map(framebuffer => {
+            if (framebuffer.width === targetWidth && framebuffer.height === targetHeight) return framebuffer;
+
+            framebuffer.destroy();
+            this.nextPresentInvalid = true;
+
+            return this._createRenderTargetFramebuffer(targetWidth, targetHeight);
+        });
+
+        if (activeTargetIndex >= 0) {
+            this.renderTargetFramebuffer = this.renderTargetFramebuffers[activeTargetIndex];
+        }
+    }
+
+    _syncRenderTargetFramebuffers(requiredCount: number) {
+        while (this.renderTargetFramebuffers.length > requiredCount) {
+            this.renderTargetFramebuffers.pop().destroy();
+            this.nextPresentInvalid = true;
+        }
+
+        while (this.renderTargetFramebuffers.length < requiredCount) {
+            this.renderTargetFramebuffers.push(this._createRenderTargetFramebuffer(this.width, this.height));
+            this.nextPresentInvalid = true;
+        }
+
+        this._resizeRenderTargetFramebuffers();
+
+        if (!this.renderTargetFramebuffers.length) {
+            this.renderTargetFramebuffer = null;
+        } else if (!this.renderTargetFramebuffer || !this.renderTargetFramebuffers.includes(this.renderTargetFramebuffer)) {
+            this.renderTargetFramebuffer = this.renderTargetFramebuffers[0];
+        }
+    }
+
+    bindRenderTargetFramebuffer() {
+        this.context.bindFramebuffer.set(this.renderTargetFramebuffer?.framebuffer ?? null);
+    }
+
+    _bindRenderTargetFramebufferIndex(index: number) {
+        this.renderTargetFramebuffer = this.renderTargetFramebuffers[index] ?? null;
+        this.bindRenderTargetFramebuffer();
+        this.context.viewport.set([0, 0, this.width, this.height]);
+        this.currentStencilSource = undefined;
+        this.nextStencilID = 1;
+        this._tileClippingMaskIDs = {};
+    }
+
+    _clearActiveRenderTarget(clearColor: Color) {
+        this.context.clear({color: clearColor, depth: 1});
+        this.clearStencil();
+    }
+
+    _clearRenderTargetFramebuffers(clearColor: Color) {
+        if (!this.renderTargetFramebuffers.length) {
+            this.bindRenderTargetFramebuffer();
+            this.context.viewport.set([0, 0, this.width, this.height]);
+            this._clearActiveRenderTarget(clearColor);
+            return;
+        }
+
+        for (let i = 0; i < this.renderTargetFramebuffers.length; i++) {
+            this._bindRenderTargetFramebufferIndex(i);
+            this._clearActiveRenderTarget(clearColor);
+        }
+
+        this._bindRenderTargetFramebufferIndex(0);
+    }
+
+    _isCompositeSeparatorLayer(layer: StyleLayer) {
+        return isCustomStyleLayer(layer) && !!layer.implementation.compositeSeperator;
+    }
+
+    _hasCompositeRender(layer: StyleLayer) {
+        return isCustomStyleLayer(layer) && !!layer.implementation.renderComposite;
+    }
+
+    _createPresentOptions(layerIds: string[], renderOptions: RenderOptions, forceRenderTarget: boolean): PresentOptions | null {
+        const compositeLayersToRenderTarget: string[][] = [];
+        let renderTargetIndex = 0;
+        let needsRenderTarget = forceRenderTarget;
+
+        for (const layerId of layerIds) {
+            const layer = this.style._layers[layerId];
+            if (this._hasCompositeRender(layer)) {
+                compositeLayersToRenderTarget[renderTargetIndex] ??= [];
+                compositeLayersToRenderTarget[renderTargetIndex].push(layerId);
+                needsRenderTarget = true;
+            }
+
+            if (this._isCompositeSeparatorLayer(layer)) {
+                needsRenderTarget = true;
+                renderTargetIndex++;
+            }
+        }
+
+        if (!needsRenderTarget) return null;
+
+        for (let i = 0; i <= renderTargetIndex; i++) {
+            compositeLayersToRenderTarget[i] ??= [];
+        }
+
+        return {
+            renderOptions,
+            compositeLayersToRenderTarget,
+        };
+    }
+
+    _drawRenderTargetFramebuffer(framebuffer: Framebuffer) {
+        const context = this.context;
+        const gl = context.gl;
+        const texture = framebuffer.colorAttachment.get();
+        if (!texture) return;
+
+        context.bindFramebuffer.set(null);
+        context.viewport.set([0, 0, this.width, this.height]);
+        context.blendEquation.set(gl.FUNC_ADD);
+        context.activeTexture.set(gl.TEXTURE0);
+        context.bindTexture.dirty = true;
+        context.bindTexture.set(texture);
+
+        this.useProgram('present', null, true).draw(
+            context,
+            gl.TRIANGLES,
+            DepthMode.disabled,
+            StencilMode.disabled,
+            ColorMode.alphaBlended,
+            CullFaceMode.disabled,
+            presentUniformValues(0),
+            null,
+            null,
+            'present',
+            this.viewportBuffer,
+            this.quadTriangleIndexBuffer,
+            this.viewportSegments
+        );
+    }
+
+    present() {
+        const presentOptions = this.nextPresentOptions;
+        const invalid = this.nextPresentInvalid;
+        this.nextPresentInvalid = false;
+        this.nextPresentOptions = null;
+
+        if (!presentOptions) {
+            throw new Error('Cannot present without prepared present options');
+        }
+
+        if (invalid) { return; }
+
+        const {renderOptions, compositeLayersToRenderTarget} = presentOptions;
+
+        const context = this.context;
+
+        context.bindFramebuffer.set(null);
+        context.viewport.set([0, 0, this.width, this.height]);
+        context.clear({color: Color.transparent, depth: 1, stencil: 0});
+
+        for (let i = 0; i < this.renderTargetFramebuffers.length; i++) {
+            this._drawRenderTargetFramebuffer(this.renderTargetFramebuffers[i]);
+
+            const compositeLayerIds = compositeLayersToRenderTarget[i] ?? [];
+            for (const compositeLayerId of compositeLayerIds) {
+                const layer = this.style._layers[compositeLayerId];
+                this.renderPass = 'composite';
+                this.renderLayer(this, this.style.tileManagers[layer.source], layer, [], renderOptions);
+            }
+        }
     }
 
     /*
@@ -486,6 +697,9 @@ export class Painter {
         const coordsDescending: {[_: string]: OverscaledTileID[]} = {};
         const coordsDescendingSymbol: {[_: string]: OverscaledTileID[]} = {};
         const renderOptions: RenderOptions = {isRenderingToTexture: false, isRenderingGlobe: style.projection?.transitionState > 0};
+        this.nextPresentOptions = this._createPresentOptions(layerIds, renderOptions, !!options.deferPresent);
+        this._syncRenderTargetFramebuffers(this.nextPresentOptions ? this.nextPresentOptions.compositeLayersToRenderTarget.length : 0);
+        this.nextPresentInvalid = false;
 
         for (const id in tileManagers) {
             const tileManager = tileManagers[id];
@@ -538,12 +752,7 @@ export class Painter {
         });
 
         // Rebind the main framebuffer now that all offscreen layers have been rendered:
-        this.context.viewport.set([0, 0, this.width, this.height]);
-        this.context.bindFramebuffer.set(null);
-
-        // Clear buffers in preparation for drawing to the main framebuffer
-        this.context.clear({color: options.showOverdrawInspector ? Color.black : Color.transparent, depth: 1});
-        this.clearStencil();
+        this._clearRenderTargetFramebuffers(options.showOverdrawInspector ? Color.black : Color.transparent);
 
         // draw sky first to not overwrite symbols
         if (this.style.sky) this.drawFunctions.sky(this, this.style.sky);
@@ -571,6 +780,7 @@ export class Painter {
         this.renderPass = 'translucent';
 
         let globeDepthRendered = false;
+        let renderTargetIndex = 0;
 
         for (this.currentLayer = 0; this.currentLayer < layerIds.length; this.currentLayer++) {
             const layer = this.style._layers[layerIds[this.currentLayer]];
@@ -594,6 +804,12 @@ export class Painter {
 
             this._renderTileClippingMasks(layer, coordsAscending[layer.source], !!this.renderToTexture);
             this.renderLayer(this, tileManager, layer, coords, renderOptions);
+
+            if (this.renderTargetFramebuffers.length &&
+                this._isCompositeSeparatorLayer(layer)) {
+                renderTargetIndex++;
+                this._bindRenderTargetFramebufferIndex(renderTargetIndex);
+            }
         }
 
         // Render atmosphere, only for Globe projection
@@ -610,6 +826,10 @@ export class Painter {
 
         if (this.options.showPadding) {
             this.drawFunctions.debugPadding(this);
+        }
+
+        if (this.renderTargetFramebuffers.length > 0 && !options.deferPresent) {
+            this.present();
         }
 
         // Set defaults for most GL values so that anyone using the state after the render
@@ -822,6 +1042,13 @@ export class Painter {
         if (this.debugOverlayTexture) {
             this.debugOverlayTexture.destroy();
         }
+
+        for (const framebuffer of this.renderTargetFramebuffers) {
+            framebuffer.destroy();
+        }
+        this.renderTargetFramebuffers = [];
+        this.renderTargetFramebuffer = null;
+        this.nextPresentOptions = null;
 
         if (this.cache) {
             for (const key in this.cache) {

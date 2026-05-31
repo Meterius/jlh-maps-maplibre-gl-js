@@ -42,6 +42,21 @@ export function drawCustom(painter: Painter, tileManager: TileManager, layer: Cu
             context.setDirty();
             painter.setBaseState();
         }
+    } else if (painter.renderPass === 'composite') {
+        const renderComposite = implementation.renderComposite;
+        if (renderComposite) {
+            painter.setCustomLayerDefaults();
+
+            context.setColorMode(painter.colorModeForRenderPass());
+            context.setStencilMode(StencilMode.disabled);
+            context.setDepthMode(DepthMode.disabled);
+
+            implementation.renderComposite(context.gl, customLayerArgs);
+
+            context.setDirty();
+            painter.setBaseState();
+            context.bindFramebuffer.set(null);
+        }
     } else if (painter.renderPass === 'translucent') {
 
         painter.setCustomLayerDefaults();
@@ -59,6 +74,6 @@ export function drawCustom(painter: Painter, tileManager: TileManager, layer: Cu
 
         context.setDirty();
         painter.setBaseState();
-        context.bindFramebuffer.set(null);
+        painter.bindRenderTargetFramebuffer();
     }
 }
